@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Virtual environments
+cancer-immuno/
+venvs/
+
+# Data / generated outputs
+data/
+output/
+outputs/
+
+# Spark
+*.log
+spark-warehouse/
+metastore_db/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
