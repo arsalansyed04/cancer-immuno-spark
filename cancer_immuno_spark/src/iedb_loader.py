@@ -59,7 +59,7 @@ def read_table(spark, jdbc_url, user, password, table, partition_column=None, nu
                 reader.option("partitionColumn", partition_column)
                 .option("lowerBound", str(bounds["lo"]))
                 .option("upperBound", str(bounds["hi"]))
-                .option("numPartitions", str(num_partitions))
+                .option("numPartitions", str(num_partitions))    # number of partitions
             )
     return reader.load()
 
@@ -73,7 +73,7 @@ def main():
     pk_hints = {
         "article": "article_id",
         "curated_epitope": "curated_epitope_id",
-        "epitope": "epitope_id",
+        "epitope": "epitope_id",      # currently not used
         "object": "object_id",
     }
 
