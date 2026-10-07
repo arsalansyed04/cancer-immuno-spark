@@ -29,6 +29,7 @@ over publication years for lung cancer."
                                            ▼
                               output/*.parquet + *.csv summaries
 ```
+<img width="526" height="586" alt="WhatsApp Image 2026-09-24 at 12 03 04" src="https://github.com/user-attachments/assets/cab56955-4e94-460e-b65e-7618df6d0f59" />
 
 ## 1. Installation
 
