@@ -30,7 +30,7 @@ CANCER_IMMUNOLOGY_MESH_TERMS = [
 IEDB_TABLES = {
     "article": "article",            # has pubmed_id, title, authors, journal
     "curated_epitope": "curated_epitope", # links reference -> epitope/object records
-    "epitope": "epitope",                 # epitope definitions
+    "epitope": "epitope",                 # epitope definitions (not used till DA-2 update)
     "object": "object",                   # antigen/source-organism info
 }
 
