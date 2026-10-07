@@ -42,8 +42,8 @@ def write_csv(df, output_path):
 
 def build_arg_parser():
     p = argparse.ArgumentParser()
-    p.add_argument("--pubmed", required=True, help="Parquet dir from pubmed_parser.py")
-    p.add_argument("--iedb", required=True, help="Parquet dir from iedb_loader.py (has subfolders per table)")
+    p.add_argument("--pubmed", required=True, help="Parquet directory from pubmed_parser.py")
+    p.add_argument("--iedb", required=True, help="Parquet directory from iedb_loader.py (has subfolders per table)")
     p.add_argument("--output", required=True)
     return p
 
@@ -67,7 +67,7 @@ def main():
             F.col("reference_id"),
         ),
         on="pmid",
-        how="inner",
+        how="inner"
     )
 
     # curated_epitope links references to curated epitope/object records.
