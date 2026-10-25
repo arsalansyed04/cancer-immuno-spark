@@ -1,0 +1,7 @@
+# RAG layer dependencies (Task 4)
+# Install with: pip install -r requirements-rag.txt
+sentence-transformers==3.0.1
+faiss-cpu==1.8.0
+rank-bm25==0.2.2
+scikit-learn==1.5.1
+anthropic==0.34.2   # optional; LLM summarisation (Task 4 summarize.py)
