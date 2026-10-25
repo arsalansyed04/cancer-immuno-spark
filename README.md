@@ -1,147 +1,259 @@
-# Distributed Analytics of Cancer Immunology Literature (Apache Spark)
+# Distributed Topic-Trend and RAG-Based Importance Analytics of Cancer Immunology Literature using Apache Spark
 
-Pipeline that fuses two sources at scale:
+Distributed big-data pipeline fusing **PubMed Central / MEDLINE baseline XML archives** with the **Immune Epitope Database (IEDB)** to discover temporal research trends, cluster latent scientific topics, score paper importance, and enable grounded hybrid retrieval (RAG).
 
-1. **PubMed Baseline (XML)** — `https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/`
-   Parsed with Spark, filtered to cancer-immunology MeSH terms.
-2. **IEDB full dump (MySQL .sql.gz)** — `https://www.iedb.org/doc/iedb_public.sql.gz`
-   Imported into MySQL, read into Spark via JDBC.
+Built for **Apache Spark 3.5.3 (PySpark)**, **FAISS**, **Rank-BM25**, and **Streamlit**.
 
-The two are joined on **PubMed ID (PMID)**, since IEDB's `reference` table stores
-the PMID of the paper each epitope/assay was curated from. That gives you, per
-paper: which MeSH terms it was tagged with, and which epitopes/antigens/assays
-IEDB curators extracted from it — enabling questions like "which antigens are
-most studied in melanoma-immunotherapy literature" or "epitope discovery rate
-over publication years for lung cancer."
+---
+
+## 1. System Architecture (5-Layer Pipeline)
 
 ```
-                 ┌────────────────────────┐        ┌──────────────────────────┐
-                 │ PubMed baseline *.xml.gz│        │ iedb_public.sql.gz       │
-                 └───────────┬─────────────┘        └────────────┬─────────────┘
-                             │ spark-xml                          │ mysql import
-                             ▼                                    ▼
-                 pubmed_parser.py  ──parquet──►  iedb_loader.py ──parquet──►
-                             │                                    │
-                             └─────────────┬──────────────────────┘
-                                           ▼
-                                  join_analysis.py
-                                           │
-                                           ▼
-                              output/*.parquet + *.csv summaries
+===================================================================================================
+LAYER L1: INGESTION & MEDALLION ETL (PySpark + spark-xml + JDBC)
+  [PubMed Baseline XML.gz]                     [IEDB MySQL Dump]
+             │                                         │
+             ▼ spark-xml                               ▼ JDBC
+      pubmed_parser.py                           iedb_loader.py
+             │                                         │
+    output/silver/pubmed_filtered               output/silver/iedb_tables/
+             └──────────────────┬──────────────────────┘
+                                ▼
+                         join_analysis.py  (de-duplicated epitope join; no fan-out)
+                                │
+                    output/gold/epitope_counts_by_mesh_term.csv
+                    output/gold/epitope_density.parquet
+───────────────────────────────────────────────────────────────────────────────────────────────────
+LAYER L2: DISTRIBUTED TOPIC MODELING & CLUSTERING (Spark MLlib)
+                                │
+                        topic_modeling.py
+    - CountVectorizer (minDF=5, maxDF=0.5, vocabSize=5000) + Scientific Stop-Words
+    - Distributed LDA Sweep (k=5, 10, 15) with Perplexity & Log-Perplexity
+    - Final LDA (k=10): Full θ-mixture per paper
+    - K-means (k=10, L2-normalized TF-IDF) with Cosine Silhouette & Cluster Sizes
+                                │
+            output/gold/paper_topics.parquet (pmid, title, theta, dominant_topic)
+            output/gold/topic_terms.csv & lda_sweep_metrics.csv
+───────────────────────────────────────────────────────────────────────────────────────────────────
+LAYER L3: TEMPORAL TREND ENGINE (PySpark)
+                                │
+                        trend_analysis.py
+    - Topic share by year & Δ percentage points (2015–2018 early vs. 2023–2025 late window)
+    - Trend categorization: emerging (Δ > +0.5pp), declining (Δ < -0.5pp), stable
+    - Key-term longitudinal prevalence (PD-1, CAR-T, neoantigen, TMB, ctDNA, resistance)
+                                │
+            output/gold/topic_share_by_year.csv
+            output/gold/topic_delta.csv
+            output/gold/term_prevalence_by_year.csv
+───────────────────────────────────────────────────────────────────────────────────────────────────
+LAYER L4: RAG & IMPORTANCE SCORING LAYER (SentenceTransformers / FAISS / BM25 / Anthropic)
+                                │
+         ┌──────────────────────┴──────────────────────┐
+         ▼                                             ▼
+     rag/embed.py + rag/index.py                 importance.py
+  Dense (Biomedical/LSA fallback) + BM25     Importance(p) = 100 × [0.35 r + 0.25 w + 0.25 e + 0.15 y] / max
+         │                                             │
+   rag/retrieve.py                                     │
+  Hybrid RRF Fusion: 1 / (60 + rank)                   │
+         │                                             │
+   rag/evaluate.py                                     │
+  Precision@10 (Dense vs BM25 vs Hybrid)               │
+         │                                             │
+   rag/summarize.py (optional Anthropic LLM)           │
+                                │                      │
+            output/gold/retrieval_eval.csv             output/gold/paper_importance.parquet
+            output/gold/faiss.index & bm25.pkl         output/gold/top10_importance.csv
+───────────────────────────────────────────────────────────────────────────────────────────────────
+LAYER L5: SERVING & VISUALIZATION (Streamlit + Matplotlib)
+         ┌─────────────────────────────────────────────┐
+         ▼                                             ▼
+  dashboard/app.py                            scripts/make_figures.py
+  (Interactive KPI, Trends, Retrieval)        (Publication Fig 2–6 PNG exports)
+===================================================================================================
 ```
-<img width="526" height="586" alt="WhatsApp Image 2026-09-24 at 12 03 04" src="https://github.com/user-attachments/assets/cab56955-4e94-460e-b65e-7618df6d0f59" />
 
-## 1. Installation
+---
 
-Tested on Ubuntu 22.04/24.04. Run as a user with sudo.
+## 2. Installation & Requirements
 
-### 1.1 Java (Spark requires JDK 8/11/17)
+The project uses modular dependency files to keep core Spark execution decoupled from local neural serving:
+
 ```bash
-sudo apt-get update
-sudo apt-get install -y openjdk-17-jdk
-java -version
-```
-
-### 1.2 Apache Spark
-```bash
-SPARK_VERSION=3.5.3
-HADOOP_VERSION=3
-cd /opt
-sudo wget https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz
-sudo tar -xzf spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz
-sudo ln -s spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} spark
-
-echo 'export SPARK_HOME=/opt/spark' >> ~/.bashrc
-echo 'export PATH=$SPARK_HOME/bin:$SPARK_HOME/sbin:$PATH' >> ~/.bashrc
-echo 'export PYSPARK_PYTHON=python3' >> ~/.bashrc
-source ~/.bashrc
-```
-
-For a multi-node cluster, install the same Spark build on every worker and
-start it with `sbin/start-master.sh` / `sbin/start-worker.sh spark://MASTER:7077`,
-then submit jobs with `--master spark://MASTER:7077`. Everything below also
-works unmodified with `--master local[*]` on a single machine.
-
-### 1.3 Python environment
-```bash
-sudo apt-get install -y python3-pip python3-venv
-python3 -m venv ~/venvs/cancer-immuno
-source ~/venvs/cancer-immuno/bin/activate
+# Core Spark processing (PySpark, pandas, pyarrow, pytest)
 pip install -r requirements.txt
+
+# RAG & Embeddings (FAISS, rank-bm25, sentence-transformers, scikit-learn)
+pip install -r requirements-rag.txt
+
+# Interactive Dashboard (Streamlit, plotly)
+pip install -r requirements-dashboard.txt
 ```
 
-### 1.4 MySQL/MariaDB (to host the IEDB dump) + JDBC driver
-```bash
-sudo apt-get install -y mariadb-server mariadb-client
-sudo systemctl enable --now mariadb
-sudo mysql -e "CREATE DATABASE iedb_public; CREATE USER 'spark'@'%' IDENTIFIED BY 'sparkpw'; GRANT ALL ON iedb_public.* TO 'spark'@'%'; FLUSH PRIVILEGES;"
+### System Prerequisites
+- **Java**: JDK 17 (recommended: Eclipse Temurin OpenJDK 17)
+- **Apache Spark**: Spark 3.5.3 pre-built with Hadoop 3
+- **Database (Optional for full IEDB)**: MySQL 8.0 or MariaDB 10.6+
 
-# JDBC connector Spark will use to read MySQL
-mkdir -p /opt/spark/jars_extra
-wget -O /opt/spark/jars_extra/mysql-connector-j-8.4.0.jar \
-  https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.4.0/mysql-connector-j-8.4.0.jar
+---
+
+## 3. Data Ingestion & Setup
+
+### 3.1 Download PubMed Baseline Files
+Use `scripts/download_pubmed.sh` to download files from NCBI FTP:
+```bash
+# Download the 10 sampled validation baseline files
+bash scripts/download_pubmed.sh --validation
+
+# Or download specific files
+bash scripts/download_pubmed.sh --files pubmed26n0850,pubmed26n0950
+
+# Or download first N files
+bash scripts/download_pubmed.sh -n 5
 ```
 
-### 1.5 spark-xml package (for PubMed XML parsing)
-No manual jar download needed — it's pulled at submit time via `--packages`
-(see the spark-submit commands below), Maven coordinate:
-`com.databricks:spark-xml_2.12:0.18.0`.
-
-## 2. Get the data
-
+### 3.2 Setup IEDB Database (Optional)
 ```bash
-bash scripts/download_pubmed.sh        # pulls a subset (or all) of the baseline
-bash scripts/setup_iedb.sh             # downloads + imports the IEDB dump into MySQL
+bash scripts/setup_iedb.sh
 ```
 
-`download_pubmed.sh` takes an optional file-count argument since the full
-baseline is ~1,700 gzipped XML files (~40GB+) — start small while testing.
+---
 
-## 3. Run the pipeline
+## 4. Running the Pipeline
+
+### 4.1 One-Command Validation Run
+To execute the complete end-to-end pipeline across all 10 validation files:
+```bash
+bash scripts/run_validation.sh
+```
+
+### 4.2 Standard Pipeline Orchestration
+To execute all stages or skip individual stages using environment flags:
+```bash
+# Run entire pipeline
+bash scripts/run_pipeline.sh
+
+# Skip download and IEDB import
+SKIP_DOWNLOAD=1 SKIP_IEDB=1 bash scripts/run_pipeline.sh
+```
+
+### 4.3 Running Individual Stages via `spark-submit` / Python
 
 ```bash
-source ~/venvs/cancer-immuno/bin/activate
-
-# Step 1: parse + MeSH-filter PubMed XML -> parquet
+# 1. PubMed Parsing & MeSH Filtering (Silver)
 spark-submit \
   --packages com.databricks:spark-xml_2.12:0.18.0 \
   --driver-memory 4g --executor-memory 4g \
-  src/pubmed_parser.py --input data/pubmed_baseline --output output/pubmed_filtered
+  src/pubmed_parser.py \
+  --input data/pubmed_baseline \
+  --output output/silver/pubmed_filtered
 
-# Step 2: load IEDB tables from MySQL -> parquet
+# 2. IEDB Ingestion (Silver)
 spark-submit \
   --jars /opt/spark/jars_extra/mysql-connector-j-8.4.0.jar \
   --driver-memory 4g \
-  src/iedb_loader.py --jdbc-url "jdbc:mysql://localhost:3306/iedb_public" \
-  --user spark --password sparkpw --output output/iedb_tables
+  src/iedb_loader.py \
+  --jdbc-url "jdbc:mysql://localhost:3306/iedb_public" \
+  --user spark --password sparkpw \
+  --output output/silver/iedb_tables
 
-# Step 3: join PubMed (by MeSH term) with IEDB (by PMID) + analyze
+# 3. De-duplicated Join Analysis (Gold)
 spark-submit \
   --driver-memory 4g --executor-memory 4g \
   src/join_analysis.py \
-  --pubmed output/pubmed_filtered --iedb output/iedb_tables --output output/analysis
+  --pubmed output/silver/pubmed_filtered \
+  --iedb output/silver/iedb_tables \
+  --output output/gold
+
+# 4. Distributed Topic Modeling (Spark MLlib LDA & K-Means)
+spark-submit \
+  --driver-memory 4g --executor-memory 4g \
+  src/topic_modeling.py \
+  --input output/silver/pubmed_filtered \
+  --output output/gold
+
+# 5. Temporal Trend Analysis
+spark-submit \
+  --driver-memory 4g \
+  src/trend_analysis.py \
+  --topics output/gold/paper_topics.parquet \
+  --silver output/silver/pubmed_filtered \
+  --output output/gold
+
+# 6. RAG Embedding & Indexing
+python src/rag/embed.py --silver output/silver/pubmed_filtered --gold output/gold
+python src/rag/index.py --gold output/gold
+
+# 7. Retrieval Evaluation (Precision@10)
+python src/rag/evaluate.py --silver output/silver/pubmed_filtered --gold output/gold
+
+# 8. Paper Importance Scoring
+python src/importance.py \
+  --topics output/gold/paper_topics.parquet \
+  --tfidf-vocab output/gold/topic_terms.csv \
+  --topic-delta output/gold/topic_delta.csv \
+  --gold output/gold \
+  --silver output/silver/pubmed_filtered
+
+# 9. Publication Figure Generation
+python scripts/make_figures.py --gold output/gold --out docs/figures
 ```
 
-Or run all three with `bash scripts/run_pipeline.sh`.
+---
 
-## 4. What you get in `output/analysis/`
+## 5. Interactive Dashboard
 
-- `epitope_counts_by_mesh_term.csv` — epitope/antigen mentions per cancer-immunology MeSH term
-- `publications_per_year.csv` — literature + curated-epitope volume over time
-- `top_antigens.csv` — most-studied antigens in the matched literature
-- `joined_papers.parquet` — full joined table for further ad-hoc Spark SQL
+Launch the Streamlit visualization app:
+```bash
+streamlit run dashboard/app.py
+```
+**Features**:
+- **Overview KPI**: Files scanned, filtered cancer-immunology corpus, vocab size, years active.
+- **Topic Trends**: Interactive area and line charts of topic proportions over time.
+- **Key Terms**: Longitudinal prevalence trajectories for checkpoint inhibitors, CAR-T, neoantigens, ctDNA, and resistance.
+- **Top Papers**: Table of top-scoring papers with direct PMID links to PubMed.
+- **Retrieval Explorer**: Hybrid RRF search interface comparing dense and BM25 hits.
 
-## 5. Notes / things to adjust
+---
 
-- **MeSH term list**: edit `CANCER_IMMUNOLOGY_MESH_TERMS` in `src/config.py` — the
-  provided list is a reasonable starting set (see below) but MeSH curation is
-  broad; refine to your scope (e.g., add specific cancer types).
-- **IEDB schema**: the IEDB public MySQL dump's exact table/column names shift
-  slightly between releases. `src/iedb_loader.py` expects tables named
-  `reference`, `curation_object`, `epitope`, `object` (typical IEDB schema) with
-  a `pubmed_id` column on `reference`. Run `SHOW TABLES;` / `DESCRIBE reference;`
-  after import and adjust the `IEDB_TABLES` dict in `src/config.py` if your
-  dump differs.
-- **Scaling**: XML parsing is the expensive step. Partition by input files
-  (Spark does this automatically per `.xml.gz`), and increase
-  `--num-executors`/`--executor-cores` on a real cluster.
+## 6. Output Tables Reference
+
+| Medallion Layer | File Path | Format | Description |
+|---|---|---|---|
+| **Silver** | `output/silver/pubmed_filtered` | Parquet | Cleaned cancer immunology papers (`pmid`, `title`, `abstract`, `pub_year`, `journal`, `mesh_terms`) |
+| **Silver** | `output/silver/iedb_tables/` | Parquet | Filtered IEDB tables (`article`, `curated_epitope`, `object`) |
+| **Gold** | `output/gold/epitope_counts_by_mesh_term.csv` | CSV | Distinct curated epitope counts per MeSH heading |
+| **Gold** | `output/gold/epitope_density.parquet` | Parquet | Epitope count per PMID (`pmid`, `n_distinct_epitopes`) |
+| **Gold** | `output/gold/paper_topics.parquet` | Parquet | Final LDA topic mixture `theta` (array<double>) and `dominant_topic` |
+| **Gold** | `output/gold/lda_sweep_metrics.csv` | CSV | Perplexity and log-perplexity for k ∈ {5, 10, 15} |
+| **Gold** | `output/gold/topic_terms.csv` | CSV | Top 20 terms and weights for each topic |
+| **Gold** | `output/gold/kmeans_cluster_sizes.csv` | CSV | Document counts per K-Means cluster (silhouette logged) |
+| **Gold** | `output/gold/topic_share_by_year.csv` | CSV | Mean θ topic share by publication year |
+| **Gold** | `output/gold/topic_delta.csv` | CSV | Early (2015-18) vs Late (2023-25) Δ share and emerging/declining tag |
+| **Gold** | `output/gold/term_prevalence_by_year.csv` | CSV | Annual percentage of abstracts containing key terms |
+| **Gold** | `output/gold/retrieval_eval.csv` | CSV | Precision@10 for Dense, BM25, and Hybrid RRF across 5 queries |
+| **Gold** | `output/gold/paper_importance.parquet` | Parquet | Importance score (0–100) with component breakdowns (`r`, `w`, `e`, `y`) |
+| **Gold** | `output/gold/top10_importance.csv` | CSV | Top 10 ranked papers across corpus |
+| **Gold** | `output/gold/run_summary.json` | JSON | End-to-end execution metadata, timings per stage, and environment specs |
+
+---
+
+## 7. Configuration Reference (`src/config.py`)
+
+All parameters are centrally managed in `src/config.py`:
+- **MeSH Filters**: 17 domain MeSH terms with strict qualifier handling (`Neoplasms/immunology`, `Melanoma/immunology`, etc.).
+- **Scientific Stop-Words**: Tailored filtering of non-informative academic boilerplate (`patients`, `results`, `study`, `cells`, `treatment`) while safeguarding domain terms (`pd-1`, `car-t`, `ctdna`).
+- **Trend Windows**: Early window (2015–2018), Late window (2023–2025), Minimum papers per year threshold (50 papers).
+- **Importance Weights**:
+  $$\text{Importance}(p) = 100 \times \frac{0.35 \cdot r(p) + 0.25 \cdot w(p) + 0.25 \cdot e(p) + 0.15 \cdot y(p)}{\max_{p'} \text{Score}(p')}$$
+  - $r(p)$: Max cosine similarity to key queries (RAG).
+  - $w(p)$: Summed TF-IDF weight of key domain terms.
+  - $e(p)$: Topic growth alignment ($\theta \cdot \max(\Delta, 0)$).
+  - $y(p)$: Recency (min-max scaled publication year).
+
+---
+
+## 8. Limitations & Methodology Notes
+
+1. **Importance Score Context**: The importance metric measures *thematic alignment and research momentum* within contemporary cancer immunotherapy topics, **not historical citation count**.
+2. **Keyword Relevance Proxy**: RAG evaluation uses a keyword presence proxy on abstracts. While fast and reproducible, it does not reward paraphrase retrieval. A human-in-the-loop template (`gold/relevance_labels_template.csv`) is generated to allow manual scoring.
+3. **IEDB Join Scale**: The join between PubMed and IEDB matches on PMID. In sampled validation subsets, matched PMIDs reflect literature sampled in both sources; full corpus runs require complete database indexing.
