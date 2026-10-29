@@ -92,8 +92,11 @@ class TestFilterByMesh:
         """Papers with empty mesh_terms should be excluded."""
         df = spark.createDataFrame(
             [(6, [])],
-            ["pmid", "mesh_terms"],
-        )
+            StructType([
+            StructField("pmid", LongType(), True),
+            StructField("mesh_terms", ArrayType(StringType()), True),
+            ]),
+	)
         result = filter_by_mesh(df, SAMPLE_MESH_TERMS)
         assert result.count() == 0
 
@@ -123,7 +126,11 @@ class TestYearExtraction:
         # Simulate what extract_fields produces
         df = spark.createDataFrame(
             [("2019", None, None)],
-            ["year_raw", "medline_raw", "article_date_raw"],
+            StructType([
+                StructField("year_raw", StringType(), True),
+                StructField("medline_raw", StringType(), True),
+                StructField("article_date_raw", StringType(), True),
+            ]),
         ).withColumn(
             "pub_year",
             F.coalesce(
@@ -138,7 +145,11 @@ class TestYearExtraction:
         """pub_year falls back to first 4-digit year in MedlineDate."""
         df = spark.createDataFrame(
             [(None, "2019 Jan-Feb", None)],
-            ["year_raw", "medline_raw", "article_date_raw"],
+            StructType([
+                StructField("year_raw", StringType(), True),
+                StructField("medline_raw", StringType(), True),
+                StructField("article_date_raw", StringType(), True),
+            ]),
         ).withColumn(
             "pub_year",
             F.coalesce(
@@ -153,7 +164,11 @@ class TestYearExtraction:
         """pub_year is None when no year string is available."""
         df = spark.createDataFrame(
             [(None, None, None)],
-            ["year_raw", "medline_raw", "article_date_raw"],
+            StructType([
+                StructField("year_raw", StringType(), True),
+                StructField("medline_raw", StringType(), True),
+                StructField("article_date_raw", StringType(), True),
+            ]),
         ).withColumn(
             "pub_year",
             F.coalesce(
@@ -174,7 +189,9 @@ class TestFlattenAbstract:
         """Create a minimal DF with abstract_raw and apply flatten_abstract."""
         df = spark.createDataFrame(
             [(abstract_raw_value,)],
-            ["abstract_raw"],
+            StructType([
+                StructField("abstract_raw", StringType(), True),
+            ]),
         )
         return flatten_abstract(df)
 

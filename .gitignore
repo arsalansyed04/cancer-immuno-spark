@@ -26,3 +26,11 @@ metastore_db/
 # IDE
 .vscode/
 .idea/
+
+# Temporary backups and diagnostic logs
+*.bak
+*.before_*
+*.log
+test_results.txt
+validation_results.txt
+.pytest_cache/

@@ -19,6 +19,7 @@ Run with:
 
 import argparse
 import os
+import pickle
 import sys
 
 import numpy as np
@@ -93,11 +94,9 @@ def encode_with_sentence_transformers(texts, model_name: str, batch_size: int) -
     return embeddings.astype(np.float32)
 
 
-def encode_with_lsa(texts, n_components: int = LSA_DIM) -> np.ndarray:
-    """Fallback: 200-dim TruncatedSVD (LSA) over TF-IDF, L2-normalised.
-
-    No network access required; runs entirely offline.
-    """
+def encode_with_lsa(texts, n_components: int = LSA_DIM,
+                    output_dir: str = None) -> np.ndarray:
+    """Fit LSA, save its models, and return normalised embeddings."""
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.decomposition import TruncatedSVD
     from sklearn.preprocessing import normalize
@@ -116,8 +115,17 @@ def encode_with_lsa(texts, n_components: int = LSA_DIM) -> np.ndarray:
     svd = TruncatedSVD(n_components=n_components, random_state=42)
     X_lsa = svd.fit_transform(X)
     X_lsa = normalize(X_lsa, norm="l2")
-    print(f"[embed] LSA explained variance ratio sum: "
-          f"{svd.explained_variance_ratio_.sum():.3f}")
+
+    if output_dir:
+        model_path = os.path.join(output_dir, "lsa_model.pkl")
+        with open(model_path, "wb") as f:
+            pickle.dump({"vectorizer": vec, "svd": svd}, f)
+        print(f"[embed] Saved LSA model -> {model_path}")
+
+    print(
+        f"[embed] LSA explained variance ratio sum: "
+        f"{svd.explained_variance_ratio_.sum():.3f}"
+    )
     return X_lsa.astype(np.float32)
 
 
@@ -140,13 +148,13 @@ def embed(silver_dir: str, output_dir: str, encoder: str,
     print(f"[embed] {len(texts)} papers to embed")
 
     if use_lsa:
-        embeddings = encode_with_lsa(texts)
+        embeddings = encode_with_lsa(texts, output_dir=output_dir)
     else:
         try:
             embeddings = encode_with_sentence_transformers(texts, encoder, batch_size)
         except Exception as e:
             print(f"[embed] sentence-transformers failed ({e}); falling back to LSA")
-            embeddings = encode_with_lsa(texts)
+            embeddings = encode_with_lsa(texts, output_dir=output_dir)
 
     np.save(npy_path, embeddings)
     pd.DataFrame({"pmid": pmids}).to_parquet(pmids_path, index=False)

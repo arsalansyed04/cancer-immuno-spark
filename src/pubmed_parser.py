@@ -27,6 +27,9 @@ import argparse
 import os
 import re
 import sys
+import gzip
+import json
+import xml.etree.ElementTree as ET
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType, IntegerType
@@ -70,6 +73,53 @@ def _first_four_digit_year(col_expr):
     """Return the first 4-digit year found in a string column, or None."""
     return F.regexp_extract(col_expr, r"(\d{4})", 1)
 
+
+
+def extract_abstracts_to_jsonl(input_dir: str, output_path: str):
+    """Stream abstract text from PubMed XML into a JSONL file."""
+    files = sorted(
+        os.path.join(input_dir, name)
+        for name in os.listdir(input_dir)
+        if name.endswith(".xml.gz")
+    )
+    count = 0
+
+    with open(output_path, "w", encoding="utf-8") as output:
+        for path in files:
+            print(f"[pubmed_parser] Extracting abstracts from {os.path.basename(path)}")
+            with gzip.open(path, "rb") as source:
+                for _, elem in ET.iterparse(source, events=("end",)):
+                    if elem.tag != "PubmedArticle":
+                        continue
+
+                    pmid_elem = elem.find("./MedlineCitation/PMID")
+                    pmid = (
+                        pmid_elem.text.strip()
+                        if pmid_elem is not None and pmid_elem.text
+                        else None
+                    )
+
+                    abstract_elem = elem.find(
+                        "./MedlineCitation/Article/Abstract"
+                    )
+                    if pmid and abstract_elem is not None:
+                        parts = []
+                        for node in abstract_elem.findall("AbstractText"):
+                            text = "".join(node.itertext()).strip()
+                            if text:
+                                label = node.attrib.get("Label")
+                                parts.append(f"{label}: {text}" if label else text)
+
+                        if parts:
+                            output.write(json.dumps({
+                                "pmid": int(pmid),
+                                "abstract": " ".join(parts),
+                            }, ensure_ascii=False) + "\n")
+                            count += 1
+
+                    elem.clear()
+
+    print(f"[pubmed_parser] Extracted abstracts for {count} articles.")
 
 def extract_fields(df):
     """Pull out PMID, title, abstract, year, journal, and raw MeSH list."""
@@ -285,7 +335,22 @@ def main():
     raw    = parse_pubmed(spark, input_glob)
     fields = extract_fields(raw)
 
-    with_abstract = flatten_abstract(fields)
+    # Recover abstract text directly from XML because spark-xml may infer
+    # nested AbstractText structures without preserving their text values.
+    abstract_jsonl = "/tmp/pubmed_abstracts.jsonl"
+    extract_abstracts_to_jsonl(args.input, abstract_jsonl)
+
+    abstract_df = (
+        spark.read.json(abstract_jsonl)
+        .withColumn("pmid", F.col("pmid").cast("long"))
+    )
+
+    fields = (
+        fields.drop("abstract_raw")
+        .join(abstract_df, on="pmid", how="left")
+    )
+
+    with_abstract = fields
     with_mesh     = normalize_mesh(with_abstract)
     filtered      = filter_by_mesh(with_mesh, CANCER_IMMUNOLOGY_MESH_TERMS)
     filtered      = filtered.filter(F.col("pmid").isNotNull())

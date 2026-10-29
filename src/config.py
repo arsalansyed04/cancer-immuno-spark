@@ -79,7 +79,7 @@ IEDB_TABLES = {
 # Vocabulary / TF-IDF parameters
 # ---------------------------------------------------------------------------
 VOCAB_SIZE = 5000
-MIN_DF     = 5      # minimum document frequency (count)
+MIN_DF     = 0.001  # minimum document frequency (fraction)
 MAX_DF     = 0.50   # maximum document frequency (fraction)
 
 # ---------------------------------------------------------------------------

@@ -30,9 +30,12 @@ import os
 import shutil
 import sys
 
+# Python 3.12 compatibility for PySpark 3.5.x
+import setuptools
+
 from pyspark.sql import functions as F
 from pyspark.ml.feature import (
-    Tokenizer,
+    RegexTokenizer,
     StopWordsRemover,
     CountVectorizer,
     IDF,
@@ -98,20 +101,41 @@ def write_csv(df, output_path: str):
 # ---------------------------------------------------------------------------
 
 def tokenize_corpus(spark, df):
-    """Clean, tokenise, and remove stop-words (English + scientific)."""
+    """Clean biomedical text while preserving internal hyphens."""
     cleaned = df.withColumn(
         "clean_abstract",
-        F.regexp_replace(F.lower(F.col("abstract")), r"[^a-z0-9\s\-]", ""),
+        F.regexp_replace(
+            F.lower(F.col("abstract")),
+            r"[^a-z0-9\s-]",
+            " ",
+        ),
     ).filter(
-        F.col("clean_abstract").isNotNull() & (F.length(F.col("clean_abstract")) > 10)
+        F.col("clean_abstract").isNotNull()
+        & (F.length(F.col("clean_abstract")) > 10)
     )
 
-    tokenizer = Tokenizer(inputCol="clean_abstract", outputCol="raw_tokens")
+    # Split on whitespace, preserving terms such as pd-l1 and car-t.
+    tokenizer = RegexTokenizer(
+        inputCol="clean_abstract",
+        outputCol="raw_tokens",
+        pattern=r"\s+",
+        gaps=True,
+        minTokenLength=2,
+        toLowercase=True,
+    )
     tokenized = tokenizer.transform(cleaned)
 
-    # Combine Spark's default English stop-words with the scientific list
+    # Remove stray hyphens at the start/end of tokens.
+    tokenized = tokenized.withColumn(
+        "raw_tokens",
+        F.expr(
+            "filter(transform(raw_tokens, x -> regexp_replace(x, '^-+|-+$', '')), "
+            "x -> x RLIKE '[a-z0-9]')"
+        ),
+    )
+
     english_sw = StopWordsRemover.loadDefaultStopWords("english")
-    all_sw     = list(set(english_sw) | set(SCIENTIFIC_STOP_WORDS))
+    all_sw = list(set(english_sw) | set(SCIENTIFIC_STOP_WORDS))
 
     remover = StopWordsRemover(
         inputCol="raw_tokens",
@@ -263,6 +287,16 @@ def main():
         tokenized, args.vocab_size, args.min_df, args.max_df
     )
     tfidf_df.cache()
+
+    # Save reusable TF-IDF features for independent K-means tuning.
+    tfidf_export = os.path.join(args.output, "tfidf_features.parquet")
+    (
+        tfidf_df.select("pmid", "title", "pub_year", "features")
+        .write.mode("overwrite")
+        .parquet(tfidf_export)
+    )
+    print(f"[topic_modeling] Saved reusable TF-IDF features to {tfidf_export}")
+
     vocab_size = len(cv_model.vocabulary)
     print(f"[topic_modeling] Vocabulary size after filtering: {vocab_size}")
 
@@ -314,15 +348,30 @@ def main():
     write_csv(topic_terms_df, os.path.join(args.output, "topic_terms.csv"))
     print("[topic_modeling] Wrote topic_terms.csv")
 
-    # topic_labels.csv: intentionally blank labels — fill by human inspection
-    # The report's labels were assigned after reading top terms per topic.
-    label_rows = [(i, "unlabelled", "") for i in range(args.final_k)]
-    labels_df  = spark.createDataFrame(label_rows, ["topic_id", "label", "top_terms"])
-    write_csv(labels_df, os.path.join(args.output, "topic_labels.csv"))
-    print(
-        "[topic_modeling] Wrote topic_labels.csv (labels are 'unlabelled'; "
-        "edit topic_labels.csv manually after inspecting topic_terms.csv)"
+    # Generate provisional labels from the highest-weight topic terms.
+    label_rows = []
+    for topic_id in range(args.final_k):
+        terms = [
+            row["term"]
+            for row in (
+                topic_terms_df
+                .filter(F.col("topic_id") == topic_id)
+                .orderBy("rank")
+                .select("term")
+                .limit(5)
+                .collect()
+            )
+            if row["term"] and row["term"].strip()
+        ]
+        top_terms = ", ".join(terms)
+        label = " / ".join(terms[:3]) if terms else "Needs review"
+        label_rows.append((topic_id, label, top_terms))
+
+    labels_df = spark.createDataFrame(
+        label_rows, ["topic_id", "label", "top_terms"]
     )
+    write_csv(labels_df, os.path.join(args.output, "topic_labels.csv"))
+    print("[topic_modeling] Wrote topic_labels.csv with provisional labels")
 
     # papers_per_topic.csv
     ppt = (

@@ -60,7 +60,7 @@ run_stage() {
 # ----- stages ---------------------------------------------------------------
 
 download() {
-    bash scripts/download_pubmed.sh "${PUBMED_N_FILES:-10}"
+    bash scripts/download_pubmed.sh -n "${PUBMED_N_FILES:-10}"
 }
 
 parse() {
@@ -206,6 +206,9 @@ run_stage SKIP_EMBED     embed_rag
 run_stage SKIP_INDEX     index_rag
 run_stage SKIP_EVAL      eval_rag
 run_stage SKIP_IMPORTANCE importance
+
+# Create the run summary before updating its timing fields
+GOLD_DIR="$GOLD_DIR" write_summary
 
 # Write run summary with collected timings
 GOLD_DIR="$GOLD_DIR" python - <<PYEOF
